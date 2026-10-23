@@ -1,0 +1,209 @@
+---
+title: "Clusterização de exoplanetas"
+author: "Cauã Pereira Masseu 204238"
+date: "2024-05-19"
+output: 
+  pdf_document:
+    fig_caption: yes
+documentclass: "article" 
+geometry: left=3cm, top=2cm, right=2cm, bottom=2cm
+papersize: A4
+mainfont: Times New Roman
+header-includes: 
+  - \usepackage{fancyhdr}
+  - \usepackage[normalem]{ulem}
+  - \useunder{\uline}{\ul}{}
+  - \usepackage[brazil]{babel}
+  - \usepackage[absolute,overlay]{textpos}
+  - \usepackage{booktabs}
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, fig.height = 5, fig.width = 7)
+```
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(mclust)
+library(kableExtra)
+library(covRobust)
+library(rvest)
+library(factoextra)
+```
+
+```{r}
+url <- "https://nssdc.gsfc.nasa.gov/planetary/factsheet/"
+read_html(url) -> page
+html_table(page, header = T)[[1]][-21,] -> table
+colnames(table) <- c("Variables", "Mercury", "Venus", "Earth",  "Moon" , "Mars",  "Jupiter", "Saturn", "Uranus" , "Neptune", "Pluto")
+
+table <- table %>% pivot_longer(cols = 2:11, names_to = "PLANETS", values_to = "Valor") %>% pivot_wider(names_from = Variables, values_from = Valor)
+table$`Mass (1024kg)` <- as.numeric(gsub(pattern = ",", replacement = ".", table$`Mass (1024kg)`))/5.970        #put in EARTH MASS which measure
+table$`Diameter (km)` <- as.numeric(gsub(pattern = ",", replacement = ".", table$`Diameter (km)`))/(12.756)     #put in EARTH RADIUS
+table$`Density (kg/m3)` <- as.numeric(gsub(pattern = ",", replacement = ".", table$`Density (kg/m3)`))/1000     #put in g/cm^3
+table$`Orbital Period (days)` <- as.numeric(gsub(pattern = ",", replacement = ".", x =  gsub(pattern = "\\*", replacement = "", table$`Orbital Period (days)`)))
+table$`Orbital Velocity (km/s)` <- as.numeric(gsub(pattern = ",", replacement = ".", x = gsub(pattern = "\\*", replacement = "", table$`Orbital Velocity (km/s)`))) * 1000 #put in (m/s)
+table$`Orbital Inclination (degrees)` <- as.numeric(gsub(pattern = ",", replacement = ".", table$`Orbital Inclination (degrees)`))
+table$`Orbital Eccentricity` <- as.numeric(gsub(pattern = ",", replacement = ".", table$`Orbital Eccentricity` ))
+table$`Obliquity to Orbit (degrees)` <- as.numeric(gsub(pattern = ",", replacement = ".", table$`Obliquity to Orbit (degrees)`))
+table <- table[, c(1:4, 12:16)] %>% filter(PLANETS != "Moon") #Escolhendo continuas
+table$pl_eqt <- c(449, 328, 279, 226, 122, 90, 64, 51, 44)
+colnames(table) <- c("pl_name",  "pl_masse", "pl_rade", "pl_dens", "pl_orbper", "pl_rvamp", "pl_orbincl", "pl_orbeccen","pl_trueobliq", "pl_eqt")
+```
+
+```{r}
+PS_2024 <-read.csv("https://raw.githubusercontent.com/caua-masseu/DADOS_EXOPLANETAS/main/PS_2024.05.23_16.45.53.csv")
+```
+
+```{r}
+PS_2024 %>% group_by(pl_name) %>% filter(pl_pubdate == max(pl_pubdate)) -> data
+data <- data[,-c(9:11)]
+data %>% distinct() -> data
+```
+
+## Introdução
+  A busca por vida extraterrestre é um grande desafio da humanidade, e a procura por planetas semelhantes à Terra se torna um passo importante nessa jornada. A vida, como a conhecemos, requer condições específicas. Logo, ao focarmos em planetas com características semelhantes à Terra, aumentamos as chances de encontrar um ambiente propício para a existência de vida, guiando-nos para os locais mais promissores para pesquisas futuras e otimizando tempo e recursos. O estudo sobre a vida fora da Terra nos permite entender como a vida se origina e se comporta em diferentes ambientes, aprofundando nossa compreensão sobre a nossa existência. Portanto, o objetivo do estudo é clusterizar planetas de acordo com as condições físicas destes e verificar as características do cluster ao qual a Terra pertence para analisar as condições mais propícias para haver vida.
+
+O banco de dados utilizado foi montando a partir de informações disponibilzadas em \href{https://exoplanetarchive.ipac.caltech.edu/}{"NASA Exoplanet Archive"}, um catálogo de dados que contém informações sobre estrelas e exoplanetas. Também foi utilizado um banco de dados sobre os planetas do Sistema Solar disponibilizado pela \href{https://nssdc.gsfc.nasa.gov/planetary/factsheet/}{NASA}. O banco de dados utilizado contém 334 observações e possui as seguintes variáveis:  
+
+- orbper: Período de órbita (em dias)
+- rade: Raio do planeta (em raio do planeta Terra)
+- massa: Massa do planeta (em massa do planeta Terra)
+- dens: Densidade do planeta (em [g/$cm^3$])
+- eqt:  Temperatura de equilíbrio do planeta (em mil Kelvins)
+
+O código utilizado para formar o banco de dados está disponível em \url{https://github.com/caua-masseu/DADOS_EXOPLANETAS/blob/main/montagem_exoplanets.R}. Não foram analisados todos os 5632 exoplanetas conhecidos devido à alta quantidade de valores faltantes sobre esses planetas, mas ainda assim foram analisados 334 planetas. Todos os valores faltantes foram retirados, considerando as informações descobertas mais recentes sobre cada planeta.
+
+## Materiais e Métodos
+
+A clusterização usando modelo de misturas da distribuição normal pressupõe que possivéis clusteres são gerados a partir de distribuições normais multivariadas, cujos parâmetros são estimados utilizando o algoritmo EM. Para conseguir essa suposição mais fortemente podemos aplicar a transformação log em algumas variáveis. Podemos parametrizar a matriz de variâcia-covariâcia impondo restrições sobre as elipses formadas a partir dos clusteres estimados, como o volume, podendo escolher entres serem iguais(E) ou diferentes(V), formato, podendo escolher entre Isométrico (I), Igual (E) ou diferente entre os clusteres(V) e a orientação dos eixos entre modelos, podendo ser isométrico(I), igual(E) ou diferente(V) ao longo dos eixos. Portanto podemos formar 14 tipos de parametrizações, e quanto menos restrição imposta mais parâmetros precisam ser estimados.  
+
+É muito comum aparecer outliers em que não se encaixam em nenhum cluster adequadamente, aumentando o número de clusteres calculado e inflando a média e a variância dos clusteres a qual pertencem. Portanto podemos calcular quem são esses candidatos a outliers utilizando Robust Covariance Estimation via Nearest Neighbor Cleaning (NNVE), um método de Wang e Raftery. Assim, temos um modelo de mistura com componente uniforme, onde é um modelo de mistura de dados com algum agrupamento e dados que são outliers (distribuidos uniformementes na região de interesse). Essa introdução de outliers artificiais tende a reduzir o número de falso-positivos outliers nos dados. Uma maneira de analisar a qualidade do modelo é a medida de incerteza sobre determinada observação pertencer a determinado cluster, quanto maior essa medida, pior a qualidade da clusterização.
+
+Igualmente ao K-means, devemos escolher o número de clusteres antes de executar o algoritmo. Mas existem compensações entre a escolha do número de clusters e a de o modelo de agrupamento. Se um modelo mais simples for usado, mais clusteres poderão ser necessários para fornecer uma boa clusterização dos dados, mas se for usado um modelo mais complexo menos clusteres podem ser suficientes. Há procedimentos Bayesianos de seleção de modelo para ajudar a decidir a melhor parametrização e a melhor quantidade de clusteres a serem utilizados, sendo o BIC e o ICL, no qual o BIC comparamos a probabilidade entre dois possiveis modelos, indicando que quanto maior o valor, melhor a possibilidade daquele modelo clusterizar os dados adequadamente. Já o ICL é calculado somando BIC a entropia do modelo, penalizando um pouco mais o tamanho de clusteres do que o BIC, e tendendo a favorecer modelos com clusteres menores e com menos incerteza. Entretanto não devemos utilizar friamente esses critérios para escolher o modelo a ser utilizado.  
+
+A vantagem de clustering baseados em modelos gaussianos em relação a outros métodos de clusterização é ser mais robusto quando se lida com outliers, não precisar deixar a escala das variáveis em uma escala semelhante além de conseguir detectar clusters de diferentes formas e tamanhos, lidando melhor com uma quantidade de dados grandes. Porém possui algumas desvantagens como ser um pouco mais complexo, ter que selecionar o número de clusteres e o tipo de parametrização da matriz de variâcia-covariâcia a ser utilizado.  
+
+No K-means, o qual foi realizado para uma comparação, é sensível as condições iniciais e a escala dos dados, pelo fato de ser baseado em distâncias entre as observações, podendo resultar em clusteres diferentes quando executado. Também há uma dificuldade em determinar a quantidade de clusteres além de resultar em clusteres de mesmo formato.
+
+## Resultados
+```{r, fig.height = 4}
+df <- rbind(data, table)
+df <- df[, -c(3,7, 9:12)] %>% drop_na()
+df <- df[-c(30, 139),]
+df <- column_to_rownames(df, var = "pl_name")
+colnames(df) <- c("orbper", "rade", "mass", "dens", "eqt")
+df$orbper <- log(df$orbper)
+df$rade <- log(df$rade)
+df$mass <- log(df$mass)
+df$dens <- log(df$dens)
+df$eqt <- df$eqt/1000
+df1 <- df
+```
+
+### Modelo de mistura gaussiano (MMG)
+```{r}
+pairs(df)
+mtext("Figura 2: Matriz de Scatterplots entre as variáveis com a transformação log nas variáveis", side = 1, line = 4, cex = 0.8)
+```
+
+Quando não aplicamos a transformação log nas variáveis, alguns outliers distorcem a visualização do gráfico, dificultando a identificação de uma distribuição normal multivariada entre os possíveis clusters, que também se tornam difíceis de visualizar. Portanto, ao aplicar a transformação log nas variáveis (exceto na temperatura de equilíbrio), fica mais fácil identificar possíveis clusters e, consequentemente, verificar uma possível distribuição normal multivariada nesses clusteres, como mostrado na Figura 2. No entanto, ainda se observam alguns fortes candidatos a outliers.
+
+```{r}
+model.BIC <- mclustBIC(df) 
+model.ICL <- mclustICL(df)
+```
+
+```{r,  fig.cap= "Gráficos com os valores BIC e ICL para a seleção de modelo", fig.height = 4}
+par(mfrow = c(1,2))
+plot(model.BIC, xlab = "Número de Clusteres") 
+plot(model.ICL, xlab = "Número de Clusteres")
+```
+
+Podemos verificar através da Figura 1 que o modelo que possui maior BIC e ICL é o VVV com 5 clusteres. Entretando, usaremos VVV com 4 clusteres(excluindo o cluster dos outliers) que possuí o terceiro maior valor de BIC e ICL, mas levando em conta também uma menor quantidade de restrições nas elipses formadas, como o volume, o formato e a orientação dos eixos poderem ser diferentes além de atenuar na quantidade de parâmetros a serem estimados.
+
+```{r}
+nnve.out <- cov.nnve(df)
+#df1$out <- nnve.out$classification
+model_noise <- Mclust(df, initialization = list(noise = (nnve.out$classification == 0)), modelNames = "VVV", G = 4, warn = TRUE)
+```
+
+```{r, fig.height = 3}
+plot(sort(model_noise$uncertainty), pch = 15, lty = 5, xlab = "Observações em ordem crescente da medida de incerteza", ylab = "Incerteza", cex = 0.5)
+mtext("Figura 3: Gráfico da incerteza das observações", side = 1, line = 4, cex = 0.8, adj = 0)
+```
+Na Figura 3, observamos as incertezas, tendo como o valor máximo de `r round(max(model_noise$uncertainty), 2) ` e sendo `r sum(model_noise$uncertainty < 0.1)` das `r nrow(df)` observações abaixo da incerteza de 10%, nos indicando uma boa clusterização.
+
+```{r}
+plot(model_noise, what = "classification") 
+mtext("Figura 4: Matriz de Scatterplots entre as variáveis com os respectivos clusteres pertencentes", side = 1, line = 4, cex = 0.8, adj = 0)
+```
+
+Podemos verificar na Figura 4 as elipses calculadas com as respectivas observações pertencentes, além de observar os outliers (pontos pretos nos gráficos), no qual aparenta um bom ajuste. Importante ressaltar que o planeta Terra foi considerado como candidato a outlier pelo algoritmo Robust Covariance Estimation via Nearest Neighbor Cleaning.
+
+```{r}
+df %>% mutate(Cluster = factor(model_noise$classification)) %>%
+pivot_longer(-Cluster, names_to = "Variavéis", values_to = "Valores") %>%
+ggplot(aes(x = Variavéis, y = Valores, fill = Cluster)) +
+geom_boxplot() + theme_classic() + coord_flip() + theme(plot.caption = element_text(hjust = 0.5, size = 11, margin = margin(t = 10)), legend.position = "bottom") + labs(caption = "Figura 5: Boxplot de cada cluster calculado pelo GMM para cada variável")
+```
+
+```{r}
+df1$cluster <- model_noise$classification
+c_earth <- df1[328, 6]
+l_earth <- filter(df1, cluster == c_earth) %>% row.names()
+```
+
+Ao visualizar a Figura 5, vemos que o cluster que a Terra pertence, cluster `r c_earth`, possui os menores valores de raio mas os maiores valores de densidade. Já em relação as demais variáveis não há uma diferença notável para o demais clusteres. Isso pode nos dar a entender que as variáveis estarem balanceadas podem resultar em uma ambiente propício a vida.
+
+### K-means
+```{r}
+k_m <- kmeans(x = df, centers = 2)
+df1$cluster_k <- k_m$cluster
+c_earth_k <-df1[328,7]
+l_earth_k <- filter(df1, cluster_k == c_earth_k) %>% row.names()
+```
+
+```{r, fig.height = 3}
+mss <- (nrow(df)-1)*sum(apply(df,2,var))
+for (i in 2:10) mss[i] <- sum(kmeans(df,centers=i)$withinss)
+
+ggplot() + geom_point(aes(y = mss, x = 1:10)) + theme_classic() + labs(x = "Número de clusteres", y = "Variação Total", caption = "Figura 6: Gráfico de Elbow para verificar a quantidade de \nclusteres no K−means") + 
+theme(plot.caption = element_text(hjust = 0.5, size = 11, margin = margin(t = 10)), legend.position = "bottom")
+```
+
+```{r, fig.height = 4, fig.cap = "Gráfico de Elbow para verificar a quantidade de clusteres no K−means"}
+#plot(silhouette(k_m$cluster, dist = dist(df, method = "euclidean")), main = "",sub = "", xlab = "valor do silhouette")
+```
+
+```{r, fig.height = 4}
+df %>% mutate(Cluster = factor(k_m$cluster)) %>%
+pivot_longer(-Cluster, names_to = "Variavéis", values_to = "Valores") %>%
+ggplot(aes(x = Variavéis, y = Valores, fill = Cluster)) +
+geom_boxplot() + theme_classic() + theme(plot.caption = element_text(hjust = 0.5, size = 11, margin = margin(t = 10)), legend.position = "bottom") + coord_flip() + labs(caption = "Figura 7: Boxplot de cada cluster calculado pelo K-means para cada variável")
+```
+Por meio da Figura 6 percebe-se que o número de clusteres ideal é K = 2, visto que aparenta ser o ponto de inflexão, através do critério de Elbow. Analisando a Figura 7, vemos que o cluster que a Terra pertence, cluster `r c_earth_k`, possui uma menor massa, menor raio e uma maior densidade comparado ao outro cluster. Nas outras duas variáveis não há uma diferença notável. 
+
+```{r}
+df1 %>% filter(cluster == c_earth) %>% group_by(cluster) %>% summarise(mean_orb = mean(orbper), mean_rade = mean(rade), mean_eqt = mean(eqt), mean_dens = mean(dens), mean_mass= mean(mass), n = n()) -> t1
+colnames(t1) <- c("cluster_k", "mean_orb", "mean_rade", "mean_eqt", "mean_dens", "mean_mass", "n")
+
+df1 %>% filter(cluster_k == c_earth_k) %>% group_by(cluster_k) %>% summarise(mean_orb = mean(orbper), mean_rade = mean(rade), mean_eqt = mean(eqt), mean_dens = mean(dens), mean_mass= mean(mass), n = n()) %>% rbind(t1) -> t1
+t1$cluster_k <- c("K-MEANS", "MMG")
+
+kable(t1, col.names = c("Método","Período de órbita", 'Raio', "Temperatura de equilíbrio", "Densidade", "Massa", "N° de Planetas"), digits = 2, caption= "Média das variáveis nos clusteres da Terra (calculado com log, exceto a Temperatura de Equilíbrio)", booktabs = T, align = 'c') %>% kable_styling(latex_options = "hold", position = "center")
+```
+Podemos fazer uma comparação entre as médias das variáveis dos 2 clusteres através da Tabela 1, onde não percebe-se nenhuma diferença aberrante, sendo a maior diferença em período de órbita. Com isso, podemos concluir também as condições médias nas quais há uma maior chance de haver vida.
+
+## Discussão
+
+Ao compararmos a quantidade de cluster que os dois métodos utilizam vemos que há uma diferença, com o k-means possuindo apenas 2 clusteres contra 5 do MMG (considerando o cluster dos outliers). Através da Tabela 1, vemos que quantidade dos planetas que pertencem ao mesmo cluster da Terra através do modelo de mistura gaussiano é `r length(l_earth)` planetas, já no k-means há `r length(l_earth_k)` planetas. Algo importante de se notar é que Marte não está presente no mesmo cluster da Terra no GMM mas está presente no mesmo cluster da Terra no K-means, igual a diversos outros planetas. 
+
+Assim, os planetas que possuem características mais semelhantes são os pertencentes ao cluster da Terra, logo, esses planetas podem haver um ambiente mais propício para a formação de vida do que os demais. Portanto, temos que levar em consideração diversas outras diversas condições biológicas e químicas, principalmente, que não foram considerados nesse estudo para a formação da vida como nós conhecemos.
+
+## Referências
+
+[1]Notas de Aula de ME921, G. Ludwig, 2024, UNICAMP.  
+[2]Bouveyron, Charles, Gilles Celeux, T Brendan Murphy, e Adrian E Raftery. 2019. Model-Based Clustering and Classification for Data Science: With Applications in R. Cambridge University Press.
+
